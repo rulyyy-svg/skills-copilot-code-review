@@ -2,10 +2,15 @@
 Authentication endpoints for the High School Management System API
 """
 
-from fastapi import APIRouter, HTTPException
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
-from ..database import teachers_collection, verify_password
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..database import sessions_collection, teachers_collection, verify_password
+from ..security import get_current_teacher, get_session_token
 
 router = APIRouter(
     prefix="/auth",
@@ -24,24 +29,36 @@ def login(username: str, password: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=401, detail="Invalid username or password")
 
-    # Return teacher information (excluding password)
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    sessions_collection.insert_one({
+        "_id": token_hash,
+        "username": teacher["username"],
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=7)
+    })
+
     return {
         "username": teacher["username"],
         "display_name": teacher["display_name"],
-        "role": teacher["role"]
+        "role": teacher["role"],
+        "token": token
     }
 
 
 @router.get("/check-session")
-def check_session(username: str) -> Dict[str, Any]:
-    """Check if a session is valid by username"""
-    teacher = teachers_collection.find_one({"_id": username})
-
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
+def check_session(teacher: dict = Depends(get_current_teacher)) -> Dict[str, Any]:
+    """Return the signed-in teacher for a valid bearer token."""
     return {
         "username": teacher["username"],
         "display_name": teacher["display_name"],
         "role": teacher["role"]
     }
+
+
+@router.post(
+    "/logout", dependencies=[Depends(get_current_teacher)])
+def logout(token: str = Depends(get_session_token)) -> Dict[str, str]:
+    """Invalidate the current login token."""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    sessions_collection.delete_one({"_id": token_hash})
+    return {"message": "Logged out"}
